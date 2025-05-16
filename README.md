@@ -29,16 +29,18 @@ python main.py
 
 The following commands can be used in the Telegram group to control the automated account:
 
-| Command              |  Description   ----------------------------------- | 
-| ------------------------------------------------------------------------  |
-| `/startai`           | Start automatic game loop (script begins running). |
-| `/stopai`            | Stop the script.                                   |
-| `/trainrl`           | Enable training mode (clicks random tiles, cashes out after 3 diamonds). |
-| `/userl`             | Enable live mode (uses RL to maximize rewards).    |
-| `/setbet <amount>`   | Set custom bet amount (default: 20).               |
-| `/setbombs <number>` | Set the number of bombs (default: 3).              |
-| `/status`            | Show the current status, including bet and bombs.  |
-| `/resume`            | Resume gameplay after manual intervention.         |
+## 🛠️ Bot Commands
+
+| Command           | Description                                                                 |
+|-------------------|-----------------------------------------------------------------------------|
+| `/startai`        | Start automatic game loop (script begins running).                          |
+| `/stopai`         | Stop the script.                                                            |
+| `/trainrl`        | Enable training mode (clicks random tiles, cashes out after 3 diamonds).    |
+| `/userl`          | Enable live mode (uses RL to maximize rewards).                             |
+| `/setbet <amount>`| Set custom bet amount (default: 20).                                        |
+| `/setbombs <num>` | Set the number of bombs (default: 3).                                       |
+| `/status`         | Show the current status, including bet and bombs.                           |
+| `/resume`         | Resume gameplay after manual intervention.                                  |
 
 ## Project Structure
 
