@@ -11,7 +11,8 @@ from typing import List, Dict, Optional, Tuple, Set
 from config import (
     GAME_BOT_USERNAME, MAX_WAIT_TIME, GRID_SIZE,
     LEARNING_RATE, DISCOUNT_FACTOR, EXPLORATION_RATE, 
-    EXPLORATION_DECAY, MIN_EXPLORATION_RATE, GROUP_ID
+    EXPLORATION_DECAY, MIN_EXPLORATION_RATE, GROUP_ID,
+    TRAINING_CASHOUT
 )
 from state_manager import StateManager
 from rl_model import RLModel
@@ -37,8 +38,12 @@ class AIGameHandler:
         self.last_response_time = time.time()
         message = event.message
         
-        # Update the current message if it contains buttons (the game grid)
+        # Get message text
+        text = message.text if message.text else ""
+        
+        # Check if this is a game grid (game board update)
         if message.buttons:
+            # Always update the current message to the latest grid
             self.current_message = message
             self.state_manager.is_game_active = True
             
@@ -46,9 +51,27 @@ class AIGameHandler:
             if not self.current_game_id:
                 self.current_game_id = str(uuid.uuid4())
                 logger.info(f"New game started with ID: {self.current_game_id}")
-        
-        # Process game state updates
-        text = message.text if message.text else ""
+                # Reset revealed diamonds counter for the new game
+                self.state_manager.revealed_diamonds = 0
+                logger.info(f"Starting fresh game with 0 diamonds revealed")
+            else:
+                logger.debug(f"Continuing game {self.current_game_id}, current diamonds: {self.state_manager.revealed_diamonds}")
+            
+            # Check for diamond in the game message
+            if "💎" in text:
+                # Update diamond count based on new diamond found
+                # This is a backup method in addition to the grid tracking
+                last_diamond_count = self.state_manager.revealed_diamonds
+                diamonds_in_message = text.count("💎")
+                
+                # Log diamond detection
+                logger.debug(f"Detected diamonds in message: {diamonds_in_message}")
+                
+                # If trying to parse the exact number of diamonds from the message text
+                # is difficult, we can just increment by 1 when we detect a new diamond message
+                if "You found a 💎" in text or "diamond" in text.lower():
+                    self.state_manager.revealed_diamonds += 1
+                    logger.info(f"Diamond found! Now have {self.state_manager.revealed_diamonds} diamonds")
         
         # Game finished with a bomb
         if "💥" in text and "Game over" in text:
@@ -100,6 +123,10 @@ class AIGameHandler:
                 
                 # Play a move if we have an active game with a grid
                 if self.state_manager.is_game_active and self.current_message and self.current_message.buttons:
+                    # Log current mode for debugging
+                    logger.debug(f"Current mode: {'Training' if self.state_manager.training_mode else 'RL'}")
+                    logger.debug(f"Current diamonds revealed: {self.state_manager.revealed_diamonds}")
+                    
                     # Choose action based on mode
                     if self.state_manager.training_mode:
                         await self._play_training_move(client)
@@ -125,19 +152,34 @@ class AIGameHandler:
     
     async def _play_training_move(self, client):
         """Play a move in training mode (random exploration)."""
+        # Log entry to training move function
+        logger.debug("Executing training move")
+        
+        # Check diamonds revealed against the training cashout threshold
+        logger.debug(f"Revealed diamonds: {self.state_manager.revealed_diamonds}, Cashout threshold: {TRAINING_CASHOUT}")
+        
         # Check if we should cash out based on diamonds revealed
-        if self.state_manager.should_cash_out_training():
+        if self.state_manager.revealed_diamonds >= TRAINING_CASHOUT:
+            logger.info(f"Training mode: Cashing out with {self.state_manager.revealed_diamonds} diamonds (threshold: {TRAINING_CASHOUT})")
             await self._cash_out(client)
             return
         
         # Choose a random unrevealed position
         position = self.state_manager.choose_action_training()
         if position is None:
+            logger.info("No valid moves left, cashing out")
             await self._cash_out(client)  # No valid moves left, cash out
             return
         
+        # Log the chosen position
         row, col = position
+        logger.debug(f"Training mode: Clicking position ({row}, {col})")
+        
+        # Click the position
         await self._click_position(client, row, col)
+        
+        # Wait a bit longer in training mode to see results
+        await asyncio.sleep(1.5)
     
     async def _play_rl_move(self, client):
         """Play a move using the RL model."""
@@ -148,15 +190,18 @@ class AIGameHandler:
         if random.random() < self.exploration_rate:
             # Explore: choose random action
             position = self.state_manager.choose_action_training()
+            logger.debug("RL mode: Exploring - choosing random position")
         else:
             # Exploit: choose best action according to RL model
             position = self.state_manager.choose_action_rl()
+            logger.debug("RL mode: Exploiting - choosing best position according to model")
         
         if position is None:
             await self._cash_out(client)  # No valid moves left, cash out
             return
         
         row, col = position
+        logger.debug(f"RL mode: Clicking position ({row}, {col})")
         
         # Record the state and action before taking it
         old_state = state
@@ -168,6 +213,9 @@ class AIGameHandler:
         # Update exploration rate
         self.exploration_rate = max(MIN_EXPLORATION_RATE, 
                                    self.exploration_rate * EXPLORATION_DECAY)
+        
+        # Wait a bit to see the result
+        await asyncio.sleep(1)
     
     async def _click_position(self, client, row, col):
         """Click a position on the game grid."""
@@ -180,10 +228,38 @@ class AIGameHandler:
             button_row = row
             button_col = col
             
+            # Validate button exists
+            if (len(self.current_message.buttons) <= button_row or 
+                len(self.current_message.buttons[button_row]) <= button_col):
+                logger.error(f"Button at position ({row}, {col}) does not exist")
+                return
+                
+            # Check if the position has already been revealed
+            if (row, col) in self.state_manager.revealed_positions:
+                logger.warning(f"Position ({row}, {col}) already revealed, choosing another position")
+                # Choose another position instead of this one
+                valid_moves = self.state_manager.get_valid_moves()
+                if valid_moves:
+                    new_row, new_col = random.choice(valid_moves)
+                    logger.info(f"Choosing new position ({new_row}, {new_col}) instead")
+                    row, col = new_row, new_col
+                    button_row, button_col = row, col
+                else:
+                    # No valid moves left, should cash out
+                    logger.info("No valid moves left, should cash out")
+                    await self._cash_out(client)
+                    return
+            
+            # Mark this position as about to be revealed
+            logger.debug(f"About to click position ({row}, {col})")
+            
             # Click the button
             self.last_response_time = time.time()
             await self.current_message.click(button_row, button_col)
             logger.debug(f"Clicked position ({row}, {col})")
+            
+            # Update state manager to track this position as revealed
+            self.state_manager.revealed_positions.add((row, col))
             
             # Wait briefly for the result
             await asyncio.sleep(0.5)
@@ -198,16 +274,29 @@ class AIGameHandler:
             return
         
         try:
+            logger.info(f"Attempting to cash out with {self.state_manager.revealed_diamonds} diamonds")
+            
             # Look for the "Cash Out" button - usually in the last row
+            cash_out_found = False
+            cash_out_texts = ["Cash Out", "💰", "cashout", "cash", "Cashout"]
+            
             for row_idx, row in enumerate(self.current_message.buttons):
                 for col_idx, button in enumerate(row):
-                    if button.text and "Cash Out" in button.text:
-                        self.last_response_time = time.time()
-                        await self.current_message.click(row_idx, col_idx)
-                        logger.info(f"Cashed out with {self.state_manager.revealed_diamonds} diamonds")
-                        return
+                    if button.text:
+                        # Check for any cash out button text variations
+                        button_text = button.text.lower()
+                        if any(cash_text.lower() in button_text for cash_text in cash_out_texts):
+                            logger.info(f"Found cash out button: '{button.text}' at position ({row_idx}, {col_idx})")
+                            self.last_response_time = time.time()
+                            await self.current_message.click(row_idx, col_idx)
+                            logger.info(f"Cashed out with {self.state_manager.revealed_diamonds} diamonds")
+                            cash_out_found = True
+                            return
             
-            logger.warning("No Cash Out button found")
+            if not cash_out_found:
+                logger.warning("No Cash Out button found. Button texts: " + str([
+                    button.text for row in self.current_message.buttons for button in row if button.text
+                ]))
             
         except Exception as e:
             logger.error(f"Error cashing out: {str(e)}")
